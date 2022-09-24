@@ -1,0 +1,100 @@
+import {Connection} from "@solana/web3.js";
+import {endlessRetry} from "./utils";
+
+// Number of upcoming slots to include when building upcoming node set
+export const UPCOMING_SLOT_SEARCH = parseInt(
+  process.env.LEADER_SLOT_FANOUT || "60"
+);
+
+// Number of past slots to include when building upcoming node set
+export const PAST_SLOT_SEARCH = 4;
+
+// Updates the leader schedule every epoch and provides a set of the
+// upcoming nodes in the schedule
+export default class LeaderScheduleService {
+  refreshing = false;
+
+  constructor(
+    private connection: Connection,
+    private leaderAddresses: Array<string>,
+    private scheduleFirstSlot: number
+  ) {}
+
+  static start = async (
+    connection: Connection,
+    currentSlot: number
+  ): Promise<LeaderScheduleService> => {
+    const leaderService = new LeaderScheduleService(
+      connection,
+      [],
+      currentSlot
+    );
+
+    leaderService.leaderAddresses = await endlessRetry("getSlotLeaders", () =>
+      leaderService.fetchLeaders(currentSlot)
+    );
+
+    return leaderService;
+  };
+
+  private async fetchLeaders(startSlot: number): Promise<Array<string>> {
+    console.log("fetchLeaders startSlot", startSlot);
+    const leaders = await this.connection.getSlotLeaders(
+      startSlot,
+      2 * UPCOMING_SLOT_SEARCH
+    );
+    return leaders.map((l) => l.toBase58());
+  }
+
+  getFirstSlot = (): number => {
+    return this.scheduleFirstSlot;
+  };
+
+  private _getSlotLeader = (slot: number): string | null => {
+    const firstSlot = this.scheduleFirstSlot;
+    const lastSlot = this.lastSlot();
+    if (slot < firstSlot) {
+      console.error(
+        `getSlotLeader failed: Tried to get ${slot} before first schedule slot ${firstSlot}`
+      );
+    } else if (slot > lastSlot) {
+      console.error(
+        `getSlotLeader failed: Tried to get ${slot} after last schedule slot ${lastSlot}`
+      );
+    } else {
+      return this.leaderAddresses[slot - this.scheduleFirstSlot];
+    }
+    return null;
+  };
+  public get getSlotLeader() {
+    return this._getSlotLeader;
+  }
+  public set getSlotLeader(value) {
+    this._getSlotLeader = value;
+  }
+
+  private lastSlot = (): number => {
+    return this.scheduleFirstSlot + this.leaderAddresses.length - 1;
+  };
+
+  shouldRefresh = (currentSlot: number): boolean => {
+    const shouldRefreshAt = this.lastSlot() - UPCOMING_SLOT_SEARCH;
+    return currentSlot >= shouldRefreshAt;
+  };
+
+  refresh = async (currentSlot: number): Promise<void> => {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    try {
+      const firstSlot = Math.max(0, currentSlot - PAST_SLOT_SEARCH);
+      console.log("in refresh");
+      const leaderAddresses = await this.fetchLeaders(firstSlot);
+      this.scheduleFirstSlot = firstSlot;
+      this.leaderAddresses = leaderAddresses;
+    } catch (err) {
+      console.log(err, "failed to refresh slot leaders");
+    } finally {
+      this.refreshing = false;
+    }
+  };
+}
